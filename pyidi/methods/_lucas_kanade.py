@@ -233,7 +233,7 @@ class LucasKanade(IDIMethod):
                     # start optimization with previous optimal parameter values
                     
                     for i_pyramid in range(self.pyramid_number,-1,-1):
-                        print(i_pyramid)                   
+
                         point_current = np.ceil(point/(2**(i_pyramid)))
                         size_current = np.ceil(np.array(self.image_size)/(2**(i_pyramid))).astype(int)               
 
@@ -247,10 +247,10 @@ class LucasKanade(IDIMethod):
                             maxiter=self.max_nfev,
                             tol=self.tol
                             )
-                        print(displacements)
+
                         if i_pyramid != 0:
                             d_init = d_init*2 + np.round(displacements*2).astype(int)
-                            print(d_init)
+
                     self.displacements[p, ii, :] = displacements + d_init 
 
                 # temp
