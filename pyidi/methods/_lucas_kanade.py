@@ -11,6 +11,8 @@ import scipy.signal
 from scipy.linalg import lu_factor, lu_solve
 from scipy.interpolate import RectBivariateSpline
 import scipy.optimize
+from skimage.transform import pyramid_gaussian
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from tqdm import tqdm
@@ -39,7 +41,7 @@ class LucasKanade(IDIMethod):
         tol=1e-8, int_order=3, verbose=1, show_pbar=True, 
         processes=1, pbar_type='atpbar', multi_type='mantichora',
         resume_analysis=True, process_number=0, reference_image=0,
-        mraw_range='full', use_numba=False
+        mraw_range='full', use_numba=False, pyramid_number = 0,
     ):
         """
         Displacement identification based on Lucas-Kanade method,
@@ -83,6 +85,8 @@ class LucasKanade(IDIMethod):
         :type mraw_range: tuple or "full"
         :param use_numba: Use numba.njit for computation speedup. Currently not implemented.
         :type use_numba: bool
+        :param pyramid_number: pyramidal implementation for lukas-kanade method, defaults to 0 (not using pyramid).
+        :type pyramid_number: int
         """
 
         if pad is not None:
@@ -115,6 +119,8 @@ class LucasKanade(IDIMethod):
             self.mraw_range = mraw_range
         if use_numba is not None:
             self.use_numba = use_numba
+        if pyramid_number is not None:
+            self.pyramid_number = pyramid_number
         
         self._set_mraw_range()
 
@@ -205,31 +211,47 @@ class LucasKanade(IDIMethod):
             if self.verbose:
                 t = time.time()
                 print(f'Interpolating the reference image...')
-            self._interpolate_reference(video)
+                
+            # if self.pyramid_number == 0:
+            #     self._interpolate_reference(video)
+            # else:
+            self._interpolate_reference_pyramid(video)
+                
             if self.verbose:
                 print(f'...done in {time.time() - t:.2f} s')
 
             # Time iteration.
             for ii, i in enumerate(self._pbar_range(self.start_time, self.stop_time, self.step_time)):
                 ii = ii + 1
-
+                G_current = video.mraw[i,:,:]
+                G_pyramid = self.create_pyramid(G_current)
+                
                 # Iterate over points.
                 for p, point in enumerate(video.points):
-                    
+
+                    d_init = np.round(self.displacements[p, ii-1, :]/(2**(self.pyramid_number))).astype(int)
                     # start optimization with previous optimal parameter values
-                    d_init = np.round(self.displacements[p, ii-1, :]).astype(int)
+                    
+                    for i_pyramid in range(self.pyramid_number,-1,-1):
+                        print(i_pyramid)                   
+                        point_current = np.ceil(point/(2**(i_pyramid)))
+                        size_current = np.ceil(np.array(self.image_size)/(2**(i_pyramid))).astype(int)               
 
-                    yslice, xslice = self._padded_slice(point+d_init, self.roi_size, self.image_size, 1)
-                    G = video.mraw[i, yslice, xslice]
+                        yslice, xslice = self._padded_slice(point_current+d_init, self.roi_size, size_current, 1)
 
-                    displacements = self.optimize_translations(
-                        G=G, 
-                        F_spline=self.interpolation_splines[p], 
-                        maxiter=self.max_nfev,
-                        tol=self.tol
-                        )
-
-                    self.displacements[p, ii, :] = displacements + d_init
+                        G = G_pyramid[i_pyramid][yslice, xslice]
+                        
+                        displacements = self.optimize_translations(
+                            G=G, 
+                            F_spline=self.interpolation_splines_pyramid[i_pyramid][p],
+                            maxiter=self.max_nfev,
+                            tol=self.tol
+                            )
+                        print(displacements)
+                        if i_pyramid != 0:
+                            d_init = d_init*2 + np.round(displacements*2).astype(int)
+                            print(d_init)
+                    self.displacements[p, ii, :] = displacements + d_init 
 
                 # temp
                 self.temp_disp[:, ii, :] = self.displacements[:, ii, :]
@@ -393,7 +415,58 @@ class LucasKanade(IDIMethod):
             )
             splines.append(spl)
         self.interpolation_splines = splines
+        
+    def _interpolate_reference_pyramid(self, video):
+        """
+        Interpolate the reference image with pyramid.
 
+        Each ROI is interpolated in advanced to save computation costs.
+        Meshgrid for every ROI (without padding) is also determined here and 
+        is later called in every time iteration for every point.
+        
+        :param video: parent object
+        :type video: object
+        """
+        pad = self.pad
+        f = self._set_reference_image(video, self.reference_image)
+        
+        f_pyramid = self.create_pyramid(f)
+        
+        splines_pyramid = []
+        for i_pyramid in range(self.pyramid_number+1):
+            
+            f_current = f_pyramid[i_pyramid]
+            
+            splines = []
+            
+            for point in video.points:
+                
+                point_current = np.ceil(point/(2**(i_pyramid)))
+                
+                size_current = np.ceil(np.array(self.image_size)/(2**(i_pyramid))).astype(int)
+                
+                yslice, xslice = self._padded_slice(point_current, self.roi_size, size_current, pad)
+
+                spl = RectBivariateSpline(
+                
+                x=np.arange(-pad, self.roi_size[0]+pad),
+                y=np.arange(-pad, self.roi_size[1]+pad),
+                z=f_current[yslice, xslice],
+
+                kx=self.int_order,
+                ky=self.int_order,
+                s=0
+                )
+                splines.append(spl)
+            
+            splines_pyramid.append(splines)
+            
+        self.interpolation_splines_pyramid = splines_pyramid
+    
+    def create_pyramid(self, image):
+        
+        return tuple(pyramid_gaussian(image, max_layer=self.pyramid_number, downscale=2, channel_axis=None))
+    
     @property
     def roi_size(self):
         """
